@@ -1,44 +1,50 @@
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 import yt_dlp
+import re
 
 app = FastAPI()
 
 class VideoRequest(BaseModel):
     url: str
-    format_id: str = "best"
-
-@app.post("/formats")
-def get_formats(req: VideoRequest):
-    ydl_opts = {'quiet': True, 'no_warnings': True}
-    try:
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            info = ydl.extract_info(req.url, download=False)
-            formats = []
-            for f in info.get('formats', []):
-                if f.get('vcodec') != 'none' or f.get('acodec') != 'none':
-                    formats.append({
-                        "format_id": f['format_id'],
-                        "ext": f.get('ext', 'mp4'),
-                        "resolution": f.get('resolution') or f.get('format_note') or "Audio",
-                        "filesize": f.get('filesize') or f.get('filesize_approx') or 0,
-                        "vcodec": f.get('vcodec'),
-                        "acodec": f.get('acodec')
-                    })
-            return {"title": info.get('title'), "formats": formats}
-    except Exception as e:
-        raise HTTPException(status_code=400, detail=str(e))
+    quality: str = "720" # আপনার অ্যাপ থেকে "720p", "1080p", "Audio" আসবে
 
 @app.post("/get_link")
 def get_link(req: VideoRequest):
-    # 1080p এর নিচে হলে এক ফাইলেই পাবেন, 1080p+ হলে আলাদা অডিও-ভিডিও আসবে
-    ydl_opts = {'quiet': True, 'format': req.format_id}
+    q = req.quality.lower()
+    
+    # ১. কোয়ালিটি বুঝে ফরম্যাট সিলেক্ট করা
+    if "audio" in q or "mp3" in q or "m4a" in q:
+        fmt = "bestaudio/best"
+    else:
+        # "720p" থেকে শুধু "720" নাম্বারটি বের করা
+        height_match = re.search(r'\d+', q)
+        height = int(height_match.group()) if height_match else 720
+        
+        if height <= 720:
+            # ৭২০p বা তার নিচে সাধারণত এক ফাইলেই (MP4) পাওয়া যায়
+            fmt = f"best[height<={height}][ext=mp4]/best[height<={height}]/best"
+        else:
+            # ১০৮০p, ৪K এর জন্য আলাদা ভিডিও এবং অডিও
+            fmt = f"bestvideo[height<={height}]+bestaudio/best"
+
+    ydl_opts = {'quiet': True, 'format': fmt}
+    
     try:
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             info = ydl.extract_info(req.url, download=False)
+            
+            # যদি আলাদা ভিডিও এবং অডিও স্ট্রিম থাকে
             if 'requested_formats' in info:
-                return {"type": "separate", "video_url": info['requested_formats'][0]['url'], "audio_url": info['requested_formats'][1]['url']}
+                v_url = ""
+                a_url = ""
+                for f in info['requested_formats']:
+                    if f.get('vcodec') != 'none': v_url = f['url']
+                    if f.get('acodec') != 'none': a_url = f['url']
+                return {"type": "separate", "video_url": v_url, "audio_url": a_url, "title": info.get('title', 'Video')}
+            
+            # যদি একক ফাইল হয়
             else:
-                return {"type": "single", "url": info['url'], "ext": info.get('ext', 'mp4')}
+                return {"type": "single", "url": info['url'], "ext": info.get('ext', 'mp4'), "title": info.get('title', 'Video')}
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
